@@ -5,6 +5,12 @@ SELFPATH="$(readlink -m "$BASH_SOURCE"/..)"
 
 function collect_info () {
   cd "$SELFPATH" || return $?
+  local RUNMODE="$1"; shift
+  case "$RUNMODE" in
+    '' ) ;;
+    :* ) "${RUNMODE#:}" "$@"; return $?;;
+    * ) echo "E: unsupported runmode: $RUNMODE" >&2; return 2;;
+  esac
 
   local SCAN_LANGS=(
     de_DE
@@ -19,6 +25,9 @@ function collect_info () {
     'https://developer.gnome.org/gtk3/stable/gtk3-Stock-Items.html' || return $?
   download cache/pygtk-stock.html \
     'http://pygtk.org/docs/pygtk/gtk-stock-items.html'
+
+  collect_item_names | sort -u >cache/item_names.txt
+
   # stockid_to_icon_filename | json-str-quote
 
   return 0
@@ -43,6 +52,21 @@ function stockid_to_icon_filename () {
   strace python -c "$RENDER_PY" 2>&1 \
     | grep -Fe 'lstat64("/usr/share/icons/' | cut -d '"' -sf 2
 }
+
+
+function collect_item_names () {
+  cut -d '"' -sf 2 cache/labels.*.json | sed -re '
+    s!^gtk-!!;s!-!_!g;s![a-z]+!\U&!g'
+  sed -nre 's~^<td class="function_name"><a [^<>]+>GTK_STOCK_([^<>]+|\
+    )</a>.*$~\1~p' cache/gnome_dev_man.html
+  grep -oPe '<code class="literal">gtk.STOCK_[^<>]+</code>' \
+    cache/pygtk-stock.html | cut -d '<' -sf 2 | cut -d _ -sf 2-
+}
+
+
+
+
+
 
 
 
