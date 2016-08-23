@@ -12,8 +12,8 @@ function collect_info () {
     * ) echo "E: unsupported runmode: $RUNMODE" >&2; return 2;;
   esac
 
-  mkdir -p cache || return $?
-  cd cache || return $?
+  mkdir -p "$SELFPATH"/tmp || return $?
+  cd "$SELFPATH"/tmp || return $?
 
   local SCAN_LANGS=(
     de_DE
@@ -35,7 +35,17 @@ function collect_info () {
   [ ! -f icon_files.json ] && collect_icon_filenames | json_align \
     | tee icon_files.json.tmp && mv -v icon_files.json{.tmp,}
 
-  nodejs ../combine_jsons.js >combined.json || return $?
+  mkdir -p "$SELFPATH"/results || return $?
+  cd "$SELFPATH"/results || return $?
+
+  local RESULT_BFN='gtk-stock-items'
+
+  nodejs ../combine_jsons.js >"$RESULT_BFN".json || return $?
+  sed -re '1s~^~\xEF\xBB\xBFdefine(~;$s~$~);~
+    ' -- "$RESULT_BFN".json >"$RESULT_BFN".amd.js || return $?
+
+  COMBO_JSON=./results/"$RESULT_BFN".json nodejs ../tabulate.js \
+    >"$RESULT_BFN".md || return $?
   return 0
 }
 
@@ -61,25 +71,46 @@ function collect_icon_filenames () {
   RENDER_PY+='gtk.Label().render_icon(gtk.STOCK_%, gtk.ICON_SIZE_BUTTON)'
 
   local STOCK_ID=
-  local ICON=
   local SEP='{ '
+  local GX_SHOT_FN=
+  local GX_TIMEOUT=
+  local SCROT_PID=
+  local SCROT_TMP=  # 'scrot.tmp.png'
+      # ^-- no need; .iconfile_gxmsg === .iconfile_pygtk for all stock items
+  local ICON_PYGTK=
+  local ICON_GXMSG=
 
+  local NUM=0
   for STOCK_ID in "${STOCK_IDS[@]}"; do
-    printf '%s"%s": { "iconFile": ' "$SEP" "$STOCK_ID"
-    ICON="$(strace -o /dev/stdout python -c "${RENDER_PY//%/$STOCK_ID}")"
-    if <<<"$ICON" grep -qPe '^write\(2,' -m 1; then
-      sleep 2s    # Python errors => slow down the fail
-      ICON=
-    else
-      ICON="$(<<<"$ICON" grep -Fe 'lstat64("/usr/share/icons/' \
-        | cut -d '"' -sf 2)"
-      ICON="${ICON//$'\n'/\\n}"
+    let NUM="$NUM+1"
+    ICON_PYGTK="$(guess_icon_strace python -c "${RENDER_PY//%/$STOCK_ID}")"
+    printf '%s"%s": { "iconfile_pygtk": %s' "$SEP" "$STOCK_ID" \
+      "${ICON_PYGTK:-null}"
+
+    if [ -n "$SCROT_TMP" ]; then
+      GX_SHOT_FN="gxmsg.${STOCK_ID,,}.png"
+      if [ -f "$GX_SHOT_FN" ]; then
+        SCROT_PID=
+        GX_TIMEOUT=1
+      else
+        GX_TIMEOUT=2
+        scrot --delay 1 --focused --silent "$SCROT_TMP" &
+        SCROT_PID=$!
+      fi
+      ICON_GXMSG="GTK_STOCK_$STOCK_ID:0, :0,$NUM / ${#STOCK_IDS[@]}:0"
+      ICON_GXMSG="$(guess_icon_strace gxmessage "$STOCK_ID" -nofocus -ontop \
+        -timeout "$GX_TIMEOUT" -buttons "$ICON_GXMSG")"
+      if [ -n "$SCROT_PID" ]; then
+        wait "$SCROT_PID"
+      fi
+      if [ "$ICON_GXMSG" == "$ICON_PYGTK" ]; then
+        echo -n ', "iconfile_gxmsg": true'
+      else
+        mv -- "$SCROT_TMP" "$GX_SHOT_FN"
+        printf ',\n% 38s"icon_gxmsg": %s' '' "${ICON_GXMSG:-null}"
+      fi
     fi
-    if [ -n "$ICON" ]; then
-      printf '"%s"' "$ICON"
-    else
-      echo -n null
-    fi
+
     echo -n ' }'
     # sleep 0.1s  # increase chance to have Ctrl-C terminate this loop
     SEP=$',\n  '
@@ -88,9 +119,35 @@ function collect_icon_filenames () {
 }
 
 
+function guess_icon_strace () {
+  local TRACE="$(env LANG{,UAGE}=en_US.UTF-8 strace -o /dev/stdout "$@")"
+  local ICON=
+  local EXCLUDE='
+    ("/usr/share/icons/DMZ-White/cursors/
+    {st_mode=S_IFDIR|
+    /apps/gxmessage.png",
+    /icon-theme.cache",
+    /index.theme",
+    '
+  EXCLUDE="${EXCLUDE//$'\n'    /$'\n'}"
+  EXCLUDE="${EXCLUDE#$'\n'}"
+  EXCLUDE="${EXCLUDE%$'\n'}"
+  if <<<"$TRACE" grep -qPe '^write\(2,' -m 1; then
+    sleep 2s    # error output from program => slow down the fail
+  else
+    ICON="$(<<<"$TRACE" grep -vFe "$EXCLUDE" \
+      | grep -Fe 'lstat64("/usr/share/icons/' \
+      | cut -d '"' -sf 2)"
+    ICON="${ICON//$'\n'/\\n}"
+  fi
+  [ -n "$ICON" ] && printf '"%s"' "$ICON"
+  return 0
+}
+
+
 function json_align () {
   sed -ure 's~\t~ ~g
-    s~:~&                                               \t~
+    s~":~&                                               \t~
     s~^([^\t]{35}) *\t~\1~
     s~ +\t~~g'
 }
@@ -122,8 +179,9 @@ function read_pygtk_docs () {
     s~^(\S+)(\t.*)> (RTL) version is ~\1\2\t_\L\3\E\t~
     s~</?(span|p|td|tr)\b[^<>]*>~~g
     /\t/!d' | sed -nre '
-    s~^(\S+)\t[^\t]*<img src=("[^"<>]*")[^\t]*~  "\1": \{ "pygtk_icon": \2~
-    s~\t(_rtl)\t[^\t]*<img src=("[^"<>]*").*$~, "pygtk_icon\1": \2~
+    s~^(\S+)\t[^\t]*<img src=("[^"<>]*")[^\t]*~  "\1": \{ "§": \2~
+    s~\t(_rtl)\t[^\t]*<img src=("[^"<>]*").*$~, "§\1": \2~
+    s~§~pygtk_docs_icon~g
     /^\s*"/s~$~ \},~p
     ' | sed -re '1s~^ ~\{~;$s~,$~\n}~' | json_align >pygtk-icons.json
 }

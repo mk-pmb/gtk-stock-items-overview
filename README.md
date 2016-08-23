@@ -3,6 +3,7 @@ gtk-stock-items-overview
 ========================
 Tools to retrieve and combine information about GTK stock items.
 
+Example result: [gtk-stock-items.md](results/gtk-stock-items.md)
 
 
 Resources
