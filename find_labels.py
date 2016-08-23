@@ -13,7 +13,7 @@ for stock_id in sorted(gtk.stock_list_ids()):
     if info is None:
         info = [stock_id, None, None, None, None]
     (id_again, label, accel_modifier, accel_keyval, translation_domain) = info
-    labels.append(jsonify(stock_id) + ': { "label.' + lang
+    labels.append(jsonify(stock_id) + ': { "label_' + lang
         + '": ' + jsonify(label) + ' }')
 
 print '{ ' + ',\n  '.join(labels) + '\n}'
