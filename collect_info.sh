@@ -21,21 +21,21 @@ function collect_info () {
     )
   local SCAN_LANG=
   for SCAN_LANG in "${SCAN_LANGS[@]}"; do
-    LANGUAGE="$SCAN_LANG" ../find_labels.py >labels."${SCAN_LANG,,}".json
+    LANGUAGE="$SCAN_LANG" ../find_labels.py \
+      | json_align >labels."${SCAN_LANG,,}".json
   done
 
-  download gnome_dev_man.html \
-    'https://developer.gnome.org/gtk3/stable/gtk3-Stock-Items.html' || return $?
-  download pygtk-stock.html \
-    'http://pygtk.org/docs/pygtk/gtk-stock-items.html'
+  read_gnome_dev_docs || return $?
+  read_pygtk_docs || return $?
 
   collect_item_names | sort -u >item_names.txt
   local STOCK_IDS=()
   readarray -t STOCK_IDS <item_names.txt
 
-  [ ! -f icon_files.json ] && collect_icon_filenames \
+  [ ! -f icon_files.json ] && collect_icon_filenames | json_align \
     | tee icon_files.json.tmp && mv -v icon_files.json{.tmp,}
 
+  nodejs ../combine_jsons.js >combined.json || return $?
   return 0
 }
 
@@ -53,10 +53,6 @@ function download () {
 function collect_item_names () {
   cut -d '"' -sf 2 labels.*.json | sed -re '
     s!^gtk-!!;s!-!_!g;s![a-z]+!\U&!g'
-  sed -nre 's~^<td class="function_name"><a [^<>]+>GTK_STOCK_([^<>]+|\
-    )</a>.*$~\1~p' gnome_dev_man.html
-  grep -oPe '<code class="literal">gtk.STOCK_[^<>]+</code>' \
-    pygtk-stock.html | cut -d '<' -sf 2 | cut -d _ -sf 2-
 }
 
 
@@ -90,6 +86,50 @@ function collect_icon_filenames () {
   done
   echo $'\n}'
 }
+
+
+function json_align () {
+  sed -ure 's~\t~ ~g
+    s~:~&                                               \t~
+    s~^([^\t]{35}) *\t~\1~
+    s~ +\t~~g'
+}
+
+
+function read_gnome_dev_docs () {
+  download gnome_dev_man.html \
+    'https://developer.gnome.org/gtk3/stable/gtk3-Stock-Items.html' || return $?
+  sed -nure 's~^\s*<pre\b[^<>]*>#define GTK_STOCK_(\S+)\s.*$|$\
+      ~  "\1": { "gnome_dev_defined": true },~p
+    ' -- gnome_dev_man.html | sed -re '1s~^ ~\{~;$s~,$~\n}~
+    ' | json_align >gnome_dev_mentions.json
+  sed -nure 's~^.*>GTK_STOCK_([^<> ]+)[ <].*\b(deprecated) since version ($\
+    |[0-9.]+) .*$~  "\1": { "gnome_dev_\2": "\3" },~p
+    ' -- gnome_dev_man.html | sed -re '1s~^ ~\{~;$s~,$~\n}~
+    ' | json_align >gnome_dev_deprecated.json
+  <gnome_dev_man.html tr -s '\r\n\t ' ' ' | sed -re 's~<hr|$~\n~g' | sed -nre '
+    s~^.*>#define GTK_STOCK_(\S+)\s.*<p class="since">Since: ([0-9.]+|$\
+      ).*$~  "\1": { "gnome_dev_since": "\2" },~p
+    ' | sed -re '1s~^ ~\{~;$s~,$~\n}~' | json_align >gnome_dev_since.json
+}
+
+
+function read_pygtk_docs () {
+  download pygtk-stock.html \
+    'http://pygtk.org/docs/pygtk/gtk-stock-items.html' || return $?
+  <pygtk-stock.html tr -s '\r\n\t ' ' ' | sed -re 's~</?tr>|$~\n~g' | sed -re '
+    s~^.*>gtk\.STOCK_([^<> ]+)</code>~\1\t~
+    s~^(\S+)(\t.*)> (RTL) version is ~\1\2\t_\L\3\E\t~
+    s~</?(span|p|td|tr)\b[^<>]*>~~g
+    /\t/!d' | sed -nre '
+    s~^(\S+)\t[^\t]*<img src=("[^"<>]*")[^\t]*~  "\1": \{ "pygtk_icon": \2~
+    s~\t(_rtl)\t[^\t]*<img src=("[^"<>]*").*$~, "pygtk_icon\1": \2~
+    /^\s*"/s~$~ \},~p
+    ' | sed -re '1s~^ ~\{~;$s~,$~\n}~' | json_align >pygtk-icons.json
+}
+
+
+
 
 
 
